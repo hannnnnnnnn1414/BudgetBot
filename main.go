@@ -1,56 +1,75 @@
 package main
 
 import (
-	"encoding/json"
+	"database/sql"
 	"fmt"
 	"log"
 	"os"
 	"strconv"
 	"strings"
-	"time"
 
-		"github.com/joho/godotenv"
+	"github.com/joho/godotenv"
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+	_ "github.com/lib/pq"
 )
 
-type Transaction struct {
-	ChatID int64     `json:"chat_id"`
-	Type   string    `json:"type"`
-	Amount int       `json:"amount"`
-	Note   string    `json:"note"`
-	Time   time.Time `json:"time"`
-}
+var db *sql.DB
 
-const dataFile = "data.json"
+func connectDB() *sql.DB {
+	host := os.Getenv("DB_HOST")
+	port := os.Getenv("DB_PORT")
+	user := os.Getenv("DB_USER")
+	password := os.Getenv("DB_PASSWORD")
+	dbname := os.Getenv("DB_NAME")
 
-func loadTransactions() []Transaction {
-	var transactions []Transaction
+	connStr := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable",
+		host, port, user, password, dbname)
 
-	file, err := os.ReadFile(dataFile)
+	database, err := sql.Open("postgres", connStr)
 	if err != nil {
-		return transactions
+		log.Panic(err)
 	}
 
-	json.Unmarshal(file, &transactions)
-	return transactions
+	err = database.Ping()
+	if err != nil {
+		log.Panic(err)
+	}
+
+	_, err = database.Exec(`
+		CREATE TABLE IF NOT EXISTS transactions (
+			id SERIAL PRIMARY KEY,
+			chat_id BIGINT NOT NULL,
+			type TEXT NOT NULL,
+			amount INT NOT NULL,
+			note TEXT,
+			created_at TIMESTAMP DEFAULT NOW()
+		)
+	`)
+	if err != nil {
+		log.Panic(err)
+	}
+
+	return database
 }
 
-func saveTransactions(transactions []Transaction) {
-	data, _ := json.MarshalIndent(transactions, "", "  ")
-	os.WriteFile(dataFile, data, 0644)
+func insertTransaction(chatID int64, txType string, amount int, note string) error {
+	_, err := db.Exec(
+		"INSERT INTO transactions (chat_id, type, amount, note) VALUES ($1, $2, $3, $4)",
+		chatID, txType, amount, note,
+	)
+	return err
 }
 
 func main() {
 	err := godotenv.Load()
 	if err != nil {
-		log.Println("Warning: .env not pound")
+		log.Println("Warning: .env gak ketemu")
 	}
+
+	db = connectDB()
+	fmt.Println("Berhasil konek ke database!")
 
 	token := os.Getenv("BOT_TOKEN")
-	if token == "" {
-		log.Panic("BOT_TOKEN kosong! file .env not pound")
-	}
-
 	bot, err := tgbotapi.NewBotAPI(token)
 	if err != nil {
 		log.Panic(err)
@@ -90,19 +109,14 @@ func main() {
 			note = parts[2]
 		}
 
-		newTx := Transaction{
-			ChatID: chatID,
-			Type:   parts[0],
-			Amount: amount,
-			Note:   note,
-			Time:   time.Now(),
+		err = insertTransaction(chatID, parts[0], amount, note)
+		if err != nil {
+			reply := tgbotapi.NewMessage(chatID, "Gagal nyimpen ke database :(")
+			bot.Send(reply)
+			continue
 		}
 
-		transactions := loadTransactions()
-		transactions = append(transactions, newTx)
-		saveTransactions(transactions)
-
-		reply := tgbotapi.NewMessage(chatID, fmt.Sprintf("Tercatat: %s Rp%d (%s)", newTx.Type, newTx.Amount, newTx.Note))
+		reply := tgbotapi.NewMessage(chatID, fmt.Sprintf("Tercatat: %s Rp%d (%s)", parts[0], amount, note))
 		bot.Send(reply)
 	}
 }
